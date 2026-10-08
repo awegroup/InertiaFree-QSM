@@ -1978,9 +1978,15 @@ class Cycle(TimeSeries):
                 mechanical_average_power[name] = float(getattr(self, 'average_power', 0.0) or 0.0)
             else:
                 phase = phases.get(name)
-                mechanical_average_power[name] = (
-                    float(getattr(phase, 'average_power', 0.0)) if phase is not None else 0.0
-                )
+                average_power = getattr(phase, 'average_power', 0.0) if phase is not None else 0.0
+                if average_power is None:
+                    caught = getattr(self, 'phase_errors', {})
+                    raise ValueError(
+                        f"Phase '{name}' has no average power"
+                        + (f" (caught: {'; '.join(f'{k}: {v}' for k, v in caught.items())})"
+                           if caught else "")
+                    )
+                mechanical_average_power[name] = float(average_power)
             electrical_average_power[name] = electrical_energy[name] / dt if dt > 0.0 else 0.0
 
         return mechanical_energy, mechanical_average_power, electrical_energy, electrical_average_power
@@ -2012,6 +2018,8 @@ class Cycle(TimeSeries):
         else:
             env_retr, env_trans, env_trac = environment_state, environment_state, environment_state
         error_in_phase = None
+        # Phase errors caught below, kept for failure diagnostics.
+        self.phase_errors = {}
         reorder = True
 
         # Configure the traction phase attributes that get_elevation_angle depends on,
@@ -2038,6 +2046,7 @@ class Cycle(TimeSeries):
         except PhaseError as e:
             if e.code not in [1, 3]:
                 raise
+            self.phase_errors['transition_rori'] = f"PhaseError {e.code}: {e.msg}"
             trans_rori.energy = 0.
             trans_rori.duration = 0.01
         last_kinematics = trans_rori.kinematics[-1]
@@ -2074,6 +2083,7 @@ class Cycle(TimeSeries):
         except PhaseError as e:
             if e.code not in [1, 3]:  # Simulation does not seem to reach end criteria.
                 raise
+            self.phase_errors['retraction'] = f"PhaseError {e.code}: {e.msg}"
             retr.energy = -1e8
             last_straight_tether_length = self.tether_length_end_retraction
             retr.duration = 100.

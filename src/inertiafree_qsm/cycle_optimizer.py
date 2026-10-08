@@ -939,6 +939,27 @@ class CycleOptimizer:
             values_by_name, use_opt_timesteps=use_opt_timesteps,
         )
 
+    def _describe_apparent_wind_failure(self, traction):
+        """Failure reason with the traction state of lowest apparent wind:
+        elevation, tether force and power against their limits."""
+        states = [(ss, kin) for ss, kin in zip(traction.steady_states,
+                                                traction.kinematics)
+                  if ss.apparent_wind_speed is not None]
+        if not states:
+            return 'apparent_wind'
+        ss, kin = min(states, key=lambda pair: pair[0].apparent_wind_speed)
+        max_force = self.sys_props.tether_force_max_limit
+        max_power = self.sys_props.max_generator_power
+        force = f"tether force {ss.tether_force_ground / 1e3:.2f} kN"
+        if max_force is not None:
+            force += f" (max {max_force / 1e3:.2f})"
+        power = f"power {ss.power_ground / 1e3:.1f} kW"
+        if max_power is not None:
+            power += f" (max {max_power / 1e3:.1f})"
+        return (f"apparent_wind (traction: v_app {ss.apparent_wind_speed:.1f} m/s"
+                f" at elevation {np.degrees(kin.elevation_angle):.1f} deg,"
+                f" reeling speed {ss.reeling_speed:.2f} m/s, {force}, {power})")
+
     def _run_cycle_values(self, values_by_name, use_opt_timesteps=True):
         """Run one cycle simulation for the given decision-variable mapping."""
         frac_end = values_by_name.get('frac_end', self._nominal_frac_end)
@@ -989,7 +1010,8 @@ class CycleOptimizer:
             if not max_tether_ok:
                 failure_reasons.append('max_tether_length_rori')
             if not apparent_wind_ok:
-                failure_reasons.append('apparent_wind')
+                failure_reasons.append(
+                    self._describe_apparent_wind_failure(traction))
 
             phase_durations = {
                 'cycle': cycle.duration,
