@@ -1753,6 +1753,20 @@ class TractionPhase(Phase):
         Mutates *kinematics* and *state* in-place.  The final state is always
         on the safe (non-violating) side of the power and force limits.
 
+        Above the elevation at which the radial wind speed drops below the
+        reeling speed, the steady state is non-physical: the apparent wind
+        turns negative, so the wing would fly at a negative angle of attack,
+        where soft wings tend to front-collapse.  For reeling-speed control,
+        ``SteadyState.find_state`` computes the aerodynamic force as
+        ``f_aero = c_r*(1+kappa**2)*(sin_theta*cos_phi-rf)**2*q*s``.
+        Squaring the radial term ``sin_theta*cos_phi - rf`` drops its sign,
+        so instead of vanishing the force grows again towards the zenith.
+        If that force exceeds *max_force*, both ends of the search interval
+        violate it, brentq cannot start, and the search falls back to the
+        zenith.  States with zero or negative apparent wind therefore count
+        as within *max_force* and *max_power*: the zenith end is then always
+        on the safe side, and the only root left is the physical crossing.
+
         Args:
             state (SteadyState): Current steady state at the reduced reeling
                 speed setpoint (mutated to the converged state).
@@ -1771,6 +1785,23 @@ class TractionPhase(Phase):
             kinematics.update()
             env_state.calculate(kinematics.z)
             state.find_state(sys_props, env_state, kinematics)
+            # Sign of return value: > 0 if max_force or max_power is exceeded,
+            # <= 0 if both are met.
+            #
+            # States with zero or negative apparent wind lie beyond the physical
+            # crossing (less wind along the tether than the reeling speed).
+            # Their reported force is not a valid steady state and can rise
+            # above max_force again towards the zenith. Returning a negative
+            # residual for them ensures that:
+            #   - the zenith end of the interval is negative, so brentq always
+            #     has the sign change it needs, and
+            #   - the only root left is the physical crossing of max_force.
+            # Other solver errors are not overridden; their reported force is
+            # used as is. Only the sign matters for the root: -max_force is the
+            # residual of a zero-force state, not a flag.
+            if (state.apparent_wind_speed is not None
+                and state.apparent_wind_speed <= 0):
+                return -max_force
             return max(state.power_ground - max_power,
                        state.tether_force_ground - max_force)
 
@@ -1978,9 +2009,15 @@ class Cycle(TimeSeries):
                 mechanical_average_power[name] = float(getattr(self, 'average_power', 0.0) or 0.0)
             else:
                 phase = phases.get(name)
-                mechanical_average_power[name] = (
-                    float(getattr(phase, 'average_power', 0.0)) if phase is not None else 0.0
-                )
+                average_power = getattr(phase, 'average_power', 0.0) if phase is not None else 0.0
+                if average_power is None:
+                    caught = getattr(self, 'phase_errors', {})
+                    raise ValueError(
+                        f"Phase '{name}' has no average power"
+                        + (f" (caught: {'; '.join(f'{k}: {v}' for k, v in caught.items())})"
+                           if caught else "")
+                    )
+                mechanical_average_power[name] = float(average_power)
             electrical_average_power[name] = electrical_energy[name] / dt if dt > 0.0 else 0.0
 
         return mechanical_energy, mechanical_average_power, electrical_energy, electrical_average_power
@@ -2012,6 +2049,8 @@ class Cycle(TimeSeries):
         else:
             env_retr, env_trans, env_trac = environment_state, environment_state, environment_state
         error_in_phase = None
+        # Phase errors caught below, kept for failure diagnostics.
+        self.phase_errors = {}
         reorder = True
 
         # Configure the traction phase attributes that get_elevation_angle depends on,
@@ -2038,6 +2077,7 @@ class Cycle(TimeSeries):
         except PhaseError as e:
             if e.code not in [1, 3]:
                 raise
+            self.phase_errors['transition_rori'] = f"PhaseError {e.code}: {e.msg}"
             trans_rori.energy = 0.
             trans_rori.duration = 0.01
         last_kinematics = trans_rori.kinematics[-1]
@@ -2074,6 +2114,7 @@ class Cycle(TimeSeries):
         except PhaseError as e:
             if e.code not in [1, 3]:  # Simulation does not seem to reach end criteria.
                 raise
+            self.phase_errors['retraction'] = f"PhaseError {e.code}: {e.msg}"
             retr.energy = -1e8
             last_straight_tether_length = self.tether_length_end_retraction
             retr.duration = 100.

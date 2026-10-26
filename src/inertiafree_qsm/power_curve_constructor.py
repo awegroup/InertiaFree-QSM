@@ -515,7 +515,9 @@ class PowerCurveConstructor:
 
         sim_ok = kpi.get('sim_successful', False)
         if not sim_ok:
-            print(f"    Wind speed {wind_speed:.1f} m/s: simulation was not successful.")
+            reason = kpi.get('failure_reason') or 'no reason recorded'
+            print(f"    Wind speed {wind_speed:.1f} m/s: simulation was not successful: "
+                  f"{reason}")
 
         return self._build_wind_speed_entry(wind_speed, kpi)
 
